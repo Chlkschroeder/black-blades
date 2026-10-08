@@ -213,6 +213,24 @@ body[data-mode="title"] #side,body[data-mode="select"] #side{display:none}
 .intro .who{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;color:var(--ash);font-size:.9rem}
 body[data-mode="intro"] #layout{grid-template-columns:minmax(0,1fr)}
 body[data-mode="intro"] #side{display:none}
+/* battle's end */
+.am-head{font-family:var(--serif);font-size:1.3rem;margin:0 0 .4rem}
+.am-head.ok{color:var(--straw)} .am-head.no{color:var(--blood)}
+.am-head span{color:var(--bone);font-size:1.05rem}
+.am-tally{margin:.2rem 0 1rem;padding-left:18px;font-size:.95rem;color:#ddd5c6}
+.am-tally li{margin:3px 0}
+.am-h{font-size:.82rem;color:var(--ash);font-weight:600;margin:1rem 0 .5rem}
+.am-row{background:var(--plate);border:1px solid var(--seam);border-radius:3px;padding:9px 11px;margin-bottom:7px}
+.am-name{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:.95rem}
+.am-name span{font-size:.8rem;color:var(--ash)}
+.am-acts{display:flex;gap:6px;margin-top:7px;flex-wrap:wrap}
+.am-acts .mini{margin-left:0;padding:4px 10px;font-size:.82rem}
+.mini[disabled]{opacity:.4;cursor:not-allowed}
+.am-note{font-family:var(--sans)!important;font-size:.9rem!important;color:var(--ash)!important;margin:.6rem 0!important}
+.am-log{margin-top:1rem}
+.am-log summary{cursor:pointer;color:var(--ash);font-size:.9rem;margin-bottom:6px}
+.am-log .clog{max-height:320px}
+.seg.speed button{padding:5px 10px;font-size:.82rem}
 /* phone layout */
 .combat{display:flex;flex-direction:column}
 .lastlog{font-size:.8rem;color:var(--ash);border-bottom:1px solid var(--seam);padding-bottom:8px;margin-bottom:10px}
@@ -501,7 +519,10 @@ function buildSidekick(id, tactic = 'defensive') {
   longRestRes(s);
   return s;
 }
+const HIT_DIE = { Fighter: 'd10', Rogue: 'd8', Cleric: 'd8', Wizard: 'd6', tamsin: 'd10', pell: 'd8', kestrel: 'd8', brynja: 'd6' };
+function ensureHD(u) { if (!u.hd) u.hd = HIT_DIE[u.kind === 'hero' ? u.cls : u.id] || 'd8'; if (u.hdLeft === undefined) u.hdLeft = u.level; }
 function longRestRes(u) {
+  ensureHD(u); u.hdLeft = u.level;
   if (u.aidBonus) { u.hpMax -= u.aidBonus; u.aidBonus = 0; }
   u.hp = u.hpMax; u.slots = u.slotMax; u.slots2 = u.slotMax2 || 0;
   u.res = {};
@@ -517,6 +538,30 @@ function longRestRes(u) {
   } else {
     if (u.id === 'tamsin' && u.level >= 2) u.res.secondWind = 1;
   }
+}
+/* Short rest: refresh short-rest features (2024 rules). Hit Dice are spent separately. */
+function shortRestRefresh(u) {
+  ensureHD(u);
+  const got = [];
+  if (u.kind === 'hero') {
+    if (u.cls === 'Fighter') {
+      if ((u.res.secondWind || 0) < 2) { u.res.secondWind = (u.res.secondWind || 0) + 1; got.push('a use of Second Wind'); }
+      if (u.level >= 2 && !u.res.actionSurge) { u.res.actionSurge = 1; got.push('Action Surge'); }
+      if (u.sub === 'battlemaster' && u.res.sup < 4) { u.res.sup = 4; got.push('superiority dice'); }
+    }
+    if (u.cls === 'Cleric' && u.level >= 2) { const max = 1 + (u.devout ? 1 : 0); if ((u.res.channel || 0) < max) { u.res.channel = (u.res.channel || 0) + 1; got.push('Channel Divinity'); } }
+    if (u.cls === 'Wizard' && !u.res.arcaneUsed && u.slots < u.slotMax) { const n = Math.min(u.slotMax - u.slots, Math.ceil(u.level / 2)); u.slots += n; u.res.arcaneUsed = 1; got.push(`${n} spell slot${n > 1 ? 's' : ''} (Arcane Recovery)`); }
+  } else if (u.id === 'tamsin' && u.level >= 2 && !u.res.secondWind) { u.res.secondWind = 1; got.push('Second Wind'); }
+  return got;
+}
+function spendHitDie(u) {
+  ensureHD(u);
+  if (u.hdLeft <= 0 || u.hp >= u.hpMax || u.alive === false) return null;
+  u.hdLeft--;
+  const r = rollDie('1' + u.hd).total; const c = mod(u.abilities.con); const n = Math.max(1, r + c);
+  const before = u.hp; u.hp = Math.min(u.hpMax, Math.max(0, u.hp) + n);
+  log(`${u.name} spends a Hit Die: ${u.hd} rolls ${r} ${sgn(c)} = ${n} (HP ${before} → ${u.hp}).`, 'good');
+  return { r, c, n };
 }
 function longRest() { party().forEach(longRestRes); G.sidekicks.forEach(s => { if (s.alive) longRestRes(s); }); }
 
@@ -877,6 +922,12 @@ function allPartyDown() { return partyUnits().filter(u => u.kind !== 'ally').eve
 
 function endCombat(outcome) {
   C.over = true;
+  const lost = allPartyDown();
+  const tally = { fell: [], fled: [], taken: [], escaped: [] };
+  foes().forEach(u => { const k = { dead: 'fell', fled: 'fled', captured: 'taken', gone: 'escaped' }[u.state]; if (k) tally[k].push(u.name); });
+  const dead = partyUnits().filter(u => u.alive === false && u.kind !== 'ally').map(u => u.name);
+  const noRest = lost ? 'Not now: you\u2019re in no state to rest here.' : (typeof C.E.noRest === 'function' ? C.E.noRest() : C.E.noRest) || null;
+  const battleLog = C.log.slice();
   partyUnits().forEach(u => {
     if (u.alive !== false && u.hp <= 0) { u.hp = 1; }
     u.cond = {}; u.stable = false; u.ds = { s: 0, f: 0 };
@@ -884,12 +935,15 @@ function endCombat(outcome) {
   });
   log(`Combat ends.`, 'round');
   const next = C.E.onEnd(C, outcome);
-  const keepLog = C.log;
+  const stillActive = foes().filter(u => u.state === 'active' && !u.noncombat).map(u => u.name);
   C = null;
-  G.mode = 'scene';
-  goto(next);
-  void keepLog;
+  if (HEADLESS) { G.mode = 'scene'; goto(next); return; }
+  G.mode = 'aftermath';
+  G.tmp.battle = { next, lost, tally, dead, noRest, log: battleLog, rested: false, stillActive };
+  render();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
+function battleContinue() { const b = G.tmp.battle; delete G.tmp.battle; G.mode = 'scene'; goto(b.next); }
 
 /* ---------- attacks ---------- */
 function weaponAtk(u, w) {
@@ -1518,6 +1572,7 @@ const denSubdue = t => ['thug', 'hask', 'rook'].includes(t.kind);
 Object.assign(ENCOUNTERS, {
   dock: {
     allowSubdue: denSubdue,
+    noRest: () => (f('act2_complete') ? null : 'No time: you\u2019re still inside the Lantern House.'),
     intro: () => 'The dockhands drop their crates and come at you.',
     setup(c) { addThugs(c, 2 + (alert() >= 2 ? 1 : 0), 'Dockhand'); c.data.warned = false; },
     roundEnd(c) {
@@ -1541,6 +1596,7 @@ Object.assign(ENCOUNTERS, {
 
   cellar: {
     allowSubdue: denSubdue,
+    noRest: () => (f('act2_complete') ? null : 'No time: you\u2019re still inside the Lantern House.'),
     intro: () => '"Who\u2019s there?" Lanterns swing between the crates.',
     setup(c) { addThugs(c, thugCount(2), 'Cellar guard'); c.data.ran = false; },
     roundEnd(c) {
@@ -1556,6 +1612,7 @@ Object.assign(ENCOUNTERS, {
 
   guardroom: {
     allowSubdue: denSubdue,
+    noRest: () => (f('act2_complete') ? null : 'No time: you\u2019re still inside the Lantern House.'),
     intro: () => 'The guard kicks his chair back and grabs a club.',
     setup(c) { addThugs(c, alert() >= 2 ? 2 : 1, 'Cave guard'); c.data.rang = false; },
     roundEnd(c) {
@@ -1571,6 +1628,7 @@ Object.assign(ENCOUNTERS, {
 
   cell_escape: {
     allowSubdue: denSubdue,
+    noRest: () => (f('act2_complete') ? null : 'No time: you\u2019re still inside the Lantern House.'),
     intro: () => 'The guard comes at the cell door with his club.',
     setup(c) { addThugs(c, 1, 'Cell guard'); },
     objectives: [{
@@ -1588,6 +1646,7 @@ Object.assign(ENCOUNTERS, {
 
   rook: {
     allowSubdue: denSubdue,
+    noRest: () => (f('act2_complete') ? null : 'No time: you\u2019re still inside the Lantern House.'),
     intro: () => `Rook sighs, draws a slim rapier from his walking stick, and steps back behind Hask. "Must we?"`,
     setup(c) {
       c.units.push(makeFoe('rook', { uid: 'rook', name: 'Benedek Rook' }));
@@ -4278,12 +4337,13 @@ const SAVE_KEY = 'blackblades_quick', AUTO_KEY = 'blackblades_auto';
 function store(key, val) { try { if (!HEADLESS) localStorage.setItem(key, val); return true; } catch (e) { return false; } }
 function fetchStore(key) { try { return HEADLESS ? null : localStorage.getItem(key); } catch (e) { return null; } }
 function autoSave() { if (G && G.hero && G.mode === 'scene') store(AUTO_KEY, JSON.stringify(G)); }
-function quickSave() { if (G.mode === 'combat') return false; const ok = store(SAVE_KEY, JSON.stringify({ ...G, savedAt: new Date().toISOString() })); toast(ok ? 'Game saved in this browser.' : 'This browser blocked saving. Use Export save file instead.'); return ok; }
+function quickSave() { if (G.mode === 'combat' || G.mode === 'aftermath') { toast('Finish the battle screen first, then save.'); return false; } const ok = store(SAVE_KEY, JSON.stringify({ ...G, savedAt: new Date().toISOString() })); toast(ok ? 'Game saved in this browser.' : 'This browser blocked saving. Use Export save file instead.'); return ok; }
 function loadFrom(json) {
   try {
     const o = JSON.parse(json);
     if (!o || !o.hero || o.v !== 1) throw new Error('bad');
-    G = o; C = null; G.mode = 'scene'; G.resp = null;
+    G = o; C = null; G.mode = 'scene'; G.resp = null; delete G.tmp.battle;
+    [G.hero, ...G.sidekicks].forEach(u => { if (u) ensureHD(u); });
     if (!SCENES[G.scene]) G.scene = 'hub_square';
     closeModal(); render(); toast('Save loaded.');
     return true;
@@ -4334,6 +4394,7 @@ function render() {
   if (G.mode === 'intro') { root.innerHTML = introHTML(); $('side').innerHTML = ''; return; }
   if (G.mode === 'gameover') { root.innerHTML = gameoverHTML(); renderSide(); return; }
   if (G.mode === 'combat' && C) root.innerHTML = combatHTML();
+  else if (G.mode === 'aftermath' && G.tmp.battle) root.innerHTML = aftermathHTML();
   else root.innerHTML = sceneHTML();
   renderSide();
   if (G.mode === 'combat' && C) { const lg = $('clog'); if (lg) lg.scrollTop = lg.scrollHeight; }
@@ -4488,7 +4549,7 @@ function hpBar(u) {
 }
 function renderSide() {
   if (!G || !G.hero) return;
-  const inCombat = G.mode === 'combat';
+  const inCombat = G.mode === 'combat' || G.mode === 'aftermath';
   const ps = [G.hero, ...G.sidekicks.filter(s => s.inParty && s.alive)];
   let h = `<section class="party"><h3>Party</h3>` + ps.map(u => `
     <div class="pc">
@@ -4505,6 +4566,7 @@ function renderSide() {
     <button class="btn" ${inCombat ? 'disabled title="Can\u2019t save during combat"' : ''} onclick="quickSave()">Quick-save</button>
     <button class="btn" ${inCombat ? 'disabled' : ''} onclick="showSaveMenu()">Save files</button>
   </section>`;
+  h += `<section class="purse"><h3>Combat speed</h3><div class="seg speed">${['fast', 'normal', 'slow'].map(k => `<button class="${SETTINGS.speed === k ? 'on' : ''}" onclick="setSpeed('${k}')">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div></section>`;
   if (!inCombat) h += `<section class="logbox"><h3>Recent rolls</h3><div class="log">${G.log.slice(-14).map(l => `<div class="l ${l.c}">${esc(l.t)}</div>`).join('')}</div></section>`;
   $('side').innerHTML = h;
 }
@@ -4654,6 +4716,46 @@ function heroDodge() { C.ts.action = false; G.hero.cond.dodging = true; log(`${G
 function heroSecondWind() { const h = G.hero; C.ts.bonus = false; h.res.secondWind--; const n = rollDie('1d10').total + h.level; healUnit(h, n); log(`${h.name} uses Second Wind and regains ${n} HP.`, 'good'); afterHeroAct(); }
 function heroSurge() { const h = G.hero; h.res.actionSurge--; C.ts.action = true; log(`${h.name} surges forward (Action Surge)!`, 'good'); render(); }
 function heroHide() { const h = G.hero; C.ts.bonus = false; const r = rollCheck(h, 'stealth', 12); log(r.line + (r.ok ? ' ✓ Hidden: next attack has advantage.' : ' ✗'), 'roll'); if (r.ok) h.cond.hidden = true; afterHeroAct(); }
+
+/* ---------- combat speed ---------- */
+const SPEEDS = { fast: 300, normal: 750, slow: 1400 };
+const SETTINGS = (() => { try { return Object.assign({ speed: 'normal' }, JSON.parse(fetchStore('blackblades_settings') || '{}')); } catch (e) { return { speed: 'normal' }; } })();
+if (!HEADLESS) AI_DELAY = SPEEDS[SETTINGS.speed] || 750;
+function setSpeed(k) { SETTINGS.speed = k; AI_DELAY = SPEEDS[k]; store('blackblades_settings', JSON.stringify(SETTINGS)); toast(`Combat speed: ${k}.`); renderSide(); }
+
+/* ---------- battle's end ---------- */
+function aftermathHTML() {
+  const b = G.tmp.battle;
+  const list = (arr, verb) => arr.length ? `<li><strong>${verb}:</strong> ${arr.map(esc).join(', ')}</li>` : '';
+  const head = b.lost ? 'Defeat' : 'Victory';
+  const sub = b.lost ? 'The fight is lost. Your story isn\u2019t over.' : (b.stillActive.length ? 'The fight is over.' : 'The field is yours.');
+  const ps = [G.hero, ...G.sidekicks.filter(s => s.inParty && s.alive && !s.away)];
+  ps.forEach(ensureHD);
+  const row = u => {
+    const can = b.rested && u.hdLeft > 0 && u.hp < u.hpMax;
+    return `<div class="am-row"><div class="am-name"><strong>${esc(u.name)}</strong><span>Hit Dice ${u.hdLeft}/${u.level} (${u.hd})</span></div>${hpBar(u)}
+      <div class="am-acts">${b.rested ? `<button class="mini" ${can ? '' : 'disabled'} onclick="amSpend('${u.uid}')">Spend a Hit Die</button>` : ''}${hasItem('potion') && u.hp < u.hpMax ? `<button class="mini" onclick="amPotion('${u.uid}')">Drink a potion</button>` : ''}</div></div>`;
+  };
+  const rest = b.lost ? '' : b.noRest
+    ? `<p class="am-note">${esc(b.noRest)}</p>`
+    : b.rested ? `<p class="am-note">${esc(b.restNote || 'The party rests for an hour.')} Spend Hit Dice to heal: each one restores its roll plus Constitution.</p>`
+    : `<button class="choice" onclick="amRest()"><span class="cl"><strong>Take a Short Rest</strong> (one hour). Spend Hit Dice to heal, and recover short-rest abilities.</span></button>`;
+  return `<article class="scene aftermath">${actBanner()}<h2>Battle\u2019s End</h2>
+    <p class="am-head ${b.lost ? 'no' : 'ok'}">${head}. <span>${sub}</span></p>
+    <ul class="am-tally">${list(b.tally.fell, 'Fell')}${list(b.tally.fled, 'Fled')}${list(b.tally.taken, 'Captured or surrendered')}${list(b.tally.escaped, 'Escaped')}${list(b.dead, 'Lost from your party')}</ul>
+    ${b.lost ? '' : `<h3 class="am-h">Your party</h3>${ps.map(row).join('')}${rest}`}
+    <details class="am-log" open><summary>How the fight went (${b.log.length} entries)</summary><div class="clog">${b.log.map(l => `<div class="l ${l.c}">${esc(l.t)}</div>`).join('')}</div></details>
+    <div class="choices"><button class="choice cont" onclick="battleContinue()">Continue</button></div></article>`;
+}
+function amFind(uid) { return [G.hero, ...G.sidekicks].find(u => u && u.uid === uid); }
+function amRest() {
+  const b = G.tmp.battle; b.rested = true;
+  const got = []; [G.hero, ...G.sidekicks.filter(s => s.inParty && s.alive && !s.away)].forEach(u => { const g = shortRestRefresh(u); if (g.length) got.push(`${u.name.split(' ')[0]} recovers ${g.join(', ')}`); });
+  b.restNote = 'The party rests for an hour.' + (got.length ? ' ' + got.join('. ') + '.' : '');
+  log('Short Rest taken.', 'good'); render();
+}
+function amSpend(uid) { const u = amFind(uid); const r = spendHitDie(u); if (r) toast(`${u.name.split(' ')[0]} regains ${r.n} HP.`); render(); }
+function amPotion(uid) { const u = amFind(uid); const n = drinkPotion(u); if (n) toast(`${u.name.split(' ')[0]} regains ${n} HP.`); render(); }
 
 /* ---------- raid chase modal ---------- */
 function showChase() {
